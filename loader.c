@@ -4,9 +4,19 @@
 #include <stdint.h>
 #include <string.h>
 
+#define MAX_FUNCTION_NAME_SIZE 1024
+
 
 // find the function address based on name
-LPVOID getFunctionAddress(char* functionName) {
+LPVOID getFunctionAddress(char* functionNameFull) {
+
+	uint16_t functionName_size = strlen(functionNameFull);
+	char functionName[MAX_FUNCTION_NAME_SIZE] = {0};
+
+	if (functionName_size > MAX_FUNCTION_NAME_SIZE) {
+		functionName_size = MAX_FUNCTION_NAME_SIZE;
+	}
+	memcpy(functionName, functionNameFull, functionName_size);
 
 	// external functions should start with "__imp_" i.e. --> __imp_User32$MessageBoxA
 	char* prefix = "__imp_";
@@ -39,9 +49,11 @@ LPVOID getFunctionAddress(char* functionName) {
 	// get address of function within library
 	LPVOID functionAddress = GetProcAddress(libHandle, localfunc);
 	if (!functionAddress) {
-		printf("\t\t\t[-] Couldn't get function address");
+		printf("\t\t\t[-] Couldn't get function address %s",localfunc);
 		exit(1);
 	}
+
+	printf("\t\t\t[D] Function address: %p\n", functionAddress);
 
 	return functionAddress;
 }
@@ -148,11 +160,14 @@ void load(char * filePath) {
 	size_t allocationSize = externalFunctionSpace + textSH.SizeOfRawData + rDataSH.SizeOfRawData;
 	
 	// allocate memory 
+
 	printf("[*] Allocating memory\n");
 	uint8_t* memoryPointer = VirtualAlloc(NULL, allocationSize, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
 	if (!memoryPointer) {
 		printf("\t[-]Failed to allocate memory\n");
 	}
+	printf("\t[D]Allocated Size: %llx\n\t\t[D] externalFunctionSpace: %llx -- TS size: %lx -- RD size: %lx\n", allocationSize, externalFunctionSpace, textSH.SizeOfRawData, rDataSH.SizeOfRawData);
+	printf("\t[D]Allocated range: %p - %p\n", memoryPointer, memoryPointer+allocationSize);
 	
 	// copy text section over
 	printf("[*] Copying data\n");
@@ -160,6 +175,9 @@ void load(char * filePath) {
 
 	// reset textRelocation entry to the start
 	textRelocationEntry = (PIMAGE_RELOCATION)(bytesBuffer + textSH.PointerToRelocations);
+
+	// number of external function relocations performed
+	uint32_t functionMappingCount = 0;
 
 	// relocate static symbols
 	printf("[*] Handling .text relocations\n");
@@ -171,13 +189,12 @@ void load(char * filePath) {
 		PIMAGE_SYMBOL currSymbol = symbolEntry + textRelocationEntry->SymbolTableIndex;
 		
 		// address where function address will be stored after the code in memory
-		size_t * functionAddressOffset = (size_t *)(memoryPointer + textSH.PointerToRawData + textSH.SizeOfRawData);
+		size_t * functionAddressOffset = (size_t *)(memoryPointer + rDataSH.SizeOfRawData + textSH.SizeOfRawData);
 
 		// get patch location
 		uint32_t * patchLocation = (uint32_t *)(memoryPointer - textSH.VirtualAddress + textRelocationEntry->VirtualAddress );
 
-		// number of external function relocations performed
-		uint32_t functionMappingCount = 0;
+		
 		
 		// is external to coff
 		if (currSymbol->StorageClass == IMAGE_SYM_CLASS_EXTERNAL && currSymbol->SectionNumber == 0) {
@@ -190,20 +207,23 @@ void load(char * filePath) {
 			// get function address
 			// couple of checks and then loadlibrarya getprocaddress
 			LPVOID funcAddress = getFunctionAddress(functionName);
+			//printf("\t\t[D]FUNCTION NAME After %s\n", functionName);
 
 			if(funcAddress) {
 				// get memory space allocated to store external address
 				*(functionAddressOffset + functionMappingCount) = (uint64_t)funcAddress;
-				
-				// calculate the offset between
-				uint32_t locationDifference = (uint32_t)((uint32_t)functionAddressOffset + functionMappingCount) - (uint32_t)(patchLocation) - 4;
 
+				// calculate the offset between
+				uint32_t locationDifference = (uint32_t)(functionAddressOffset + functionMappingCount) - (uint32_t)(patchLocation) - 4;
 				// coppy differnce
 				*(uint32_t *)patchLocation = locationDifference;
-
-				functionMappingCount++;
 			}
+			else {
+				printf("[-] Failed to get function address\n");
+				return;
 
+			}
+			functionMappingCount++;
 		}
 		// is internal
 		else {
@@ -243,6 +263,6 @@ void load(char * filePath) {
 }
 
 int main(int argc, char ** argv) {
-	load(argv[1]);
+	load("./testprogram.out");
 	return 0;
 }
