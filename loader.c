@@ -114,8 +114,8 @@ void load(char * filePath) {
 	PIMAGE_SYMBOL symbolEntry = (PIMAGE_SYMBOL)(bytesBuffer + coffHeader->PointerToSymbolTable);
 
 
-	IMAGE_SECTION_HEADER textSH ;
-	IMAGE_SECTION_HEADER rDataSH ;
+	IMAGE_SECTION_HEADER textSH;
+	IMAGE_SECTION_HEADER rDataSH;
 
 	// find .text, .rdata
 	PIMAGE_SECTION_HEADER sectionHeader = (PIMAGE_SECTION_HEADER) (bytesBuffer + sizeof(IMAGE_FILE_HEADER));
@@ -157,7 +157,7 @@ void load(char * filePath) {
 	printf("[*] External function space needed: %lld\n\t [D] Number of relcations: %lld\n", externalFunctionSpace, numExtRelocations);
 
 	// total allocation size = size of text section + size of read only data + external function space
-	size_t allocationSize = externalFunctionSpace + textSH.SizeOfRawData + rDataSH.SizeOfRawData;
+	size_t allocationSize = externalFunctionSpace + textSH.SizeOfRawData;
 	
 	// allocate memory 
 
@@ -170,7 +170,8 @@ void load(char * filePath) {
 	printf("\t[D]Allocated range: %p - %p\n", memoryPointer, memoryPointer+allocationSize);
 	
 	// copy text section over
-	printf("[*] Copying data\n");
+	printf("[*]Copying .text\n");
+	printf("\t[D] %p --> %p\n", memoryPointer, memoryPointer+textSH.SizeOfRawData);
 	memcpy(memoryPointer, bytesBuffer + textSH.PointerToRawData, textSH.SizeOfRawData);
 
 	// reset textRelocation entry to the start
@@ -189,13 +190,12 @@ void load(char * filePath) {
 		PIMAGE_SYMBOL currSymbol = symbolEntry + textRelocationEntry->SymbolTableIndex;
 		
 		// address where function address will be stored after the code in memory
-		size_t * functionAddressOffset = (size_t *)(memoryPointer + rDataSH.SizeOfRawData + textSH.SizeOfRawData);
+		size_t * functionAddressOffset = (size_t *)(memoryPointer + textSH.SizeOfRawData);
 
 		// get patch location
 		uint32_t * patchLocation = (uint32_t *)(memoryPointer - textSH.VirtualAddress + textRelocationEntry->VirtualAddress );
+		printf("\t[D] Patch location %lx\n", patchLocation);
 
-		
-		
 		// is external to coff
 		if (currSymbol->StorageClass == IMAGE_SYM_CLASS_EXTERNAL && currSymbol->SectionNumber == 0) {
 
@@ -207,7 +207,6 @@ void load(char * filePath) {
 			// get function address
 			// couple of checks and then loadlibrarya getprocaddress
 			LPVOID funcAddress = getFunctionAddress(functionName);
-			//printf("\t\t[D]FUNCTION NAME After %s\n", functionName);
 
 			if(funcAddress) {
 				// get memory space allocated to store external address
@@ -215,6 +214,7 @@ void load(char * filePath) {
 
 				// calculate the offset between
 				uint32_t locationDifference = (uint32_t)(functionAddressOffset + functionMappingCount) - (uint32_t)(patchLocation) - 4;
+				
 				// coppy differnce
 				*(uint32_t *)patchLocation = locationDifference;
 			}
@@ -229,22 +229,29 @@ void load(char * filePath) {
 		else {
 
 			IMAGE_SECTION_HEADER targetSection = sectionHeader[currSymbol->SectionNumber - 1];
-			printf("\t\t [D] Section %s -- %d\n", targetSection.Name, currSymbol->SectionNumber - 1);
+			printf("\t\t[D] Section %s -- %d\n", targetSection.Name, currSymbol->SectionNumber - 1);
 
-			printf("\t\t [*] Applying local relocation\n");
+			printf("\t\t[*] Applying local relocation\n");
 			uint8_t * start_targetSection = bytesBuffer +  targetSection.PointerToRawData;
 			switch (textRelocationEntry->Type){
 
-				case IMAGE_REL_AMD64_REL32: 
+				case IMAGE_REL_AMD64_REL32: // The 32-bit relative address from the byte following the relocation. 
+					// *patchLocation : offset into section where the data we are looking for is
+					// start_targetSection: VA of the start of the target section (probably .rdata)
+					// currSymbol->Value: additional symbol offset
+					// patchLocation: VA of patch location 
+					// 4 : accounting for the size of the address that is being overwritten
+					printf("\t\t[D]ST_TS: %lx -- CS->VALUE %x -- patchLocation %lx -- *patchLocation %lx\n", start_targetSection, currSymbol->Value, patchLocation, *patchLocation);
 					*patchLocation += start_targetSection + currSymbol->Value - (PBYTE)patchLocation - 4; 
+					
 					break;
-				case IMAGE_REL_AMD64_ADDR32NB: 
+				case IMAGE_REL_AMD64_ADDR32NB: // The 32-bit address without an image base (RVA). 
 					*patchLocation = *(uint32_t*)(patchLocation + (start_targetSection - (PBYTE)patchLocation - 4)); 
 					break;
-				case IMAGE_REL_AMD64_ADDR64: 
+				case IMAGE_REL_AMD64_ADDR64: // The 64-bit VA of the relocation target. 
 					*patchLocation = *(uint32_t*)(*patchLocation + start_targetSection);  
 					break;
-				default:
+				default: // all other cases
 					break;
 				}
 		}
@@ -254,10 +261,24 @@ void load(char * filePath) {
 	printf("[*] Finished relocations\n");
 	// cast to fp and execute
 	VOID(*functionPointer)(char * in, unsigned long datalen);
-	functionPointer = (void(*)(char *, unsigned long))(memoryPointer);
+
+
+	// main will not always be the first function
+	for (int i = 0 ; i < coffHeader->NumberOfSymbols; i ++) {
+		printf("%s\n",symbolEntry->N.ShortName);
+		if ( strncmp(symbolEntry->N.ShortName, "go", strlen("go")) == 0) {
+			printf("FOUNDIT -- > %x\n", symbolEntry->Value);
+			functionPointer = (void(*)(char *, unsigned long))(memoryPointer + symbolEntry->Value);
+		}
+		symbolEntry++;
+	}
+
+	//functionPointer = (void(*)(char *, unsigned long))(memoryPointer);
 
 	printf("Attempting to execute memory at %p\n \t[D] First bytes: %x\n", functionPointer, *((uint32_t *) functionPointer));
 	char * helllllo = "hello";
+
+
 	functionPointer(helllllo, 0);
 	printf("[+] Returned to loader\n");
 }
